@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792963621900,
+      "tag": "0000_awesome_deathstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792964871876,
+      "tag": "0001_white_white_tiger",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793036145443,
+      "tag": "0002_fat_xavin",
+      "breakpoints": true
+    }
+  ]
+}

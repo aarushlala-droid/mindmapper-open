@@ -1,0 +1,23 @@
+import { useState } from 'react';
+import { RotateCcw, Keyboard, Type, Check } from 'lucide-react';
+import { Dialog } from './Dialog';
+import { COMMANDS, DEFAULT_PREFERENCES, FONT_OPTIONS, normalizePreferences, shortcutFromEvent, shortcutLabel, type Preferences, type CommandId } from '../services/preferences';
+import { settingsService } from '../services/settings';
+export function SettingsModal({onClose}:{onClose:()=>void}) {
+  const [draft,setDraft]=useState<Preferences>(()=>structuredClone(settingsService.preferences));
+  const [recording,setRecording]=useState<CommandId|null>(null);const [feedback,setFeedback]=useState('');const [busy,setBusy]=useState(false);
+  const preset=FONT_OPTIONS.some(f=>f.value===draft.fontFamily)?draft.fontFamily:'custom';
+  const record=(e:React.KeyboardEvent,id:CommandId)=>{
+    e.preventDefault();e.stopPropagation();if(e.key==='Escape'){setRecording(null);return;}
+    const key=shortcutFromEvent(e.nativeEvent);if(!key)return;
+    if(/^(Mod\+(w|q|r|t|l)|Mod\+Shift\+(w|q|t)|Alt\+F4)$/.test(key)){setFeedback('That shortcut is reserved by your browser. Choose another combination.');return;}
+    const duplicate=COMMANDS.find(c=>c.id!==id&&draft.shortcuts[c.id]===key);
+    setDraft(p=>({...p,shortcuts:{...p.shortcuts,...(duplicate?{[duplicate.id]:''}:{}),[id]:key}}));setRecording(null);setFeedback(duplicate?`${duplicate.label} is now unassigned. ${shortcutLabel(key)} is assigned to ${COMMANDS.find(c=>c.id===id)?.label.toLowerCase()}.`:'');
+  };
+  return <Dialog title="Make it feel like you" description="Your type, your shortcuts, your way of thinking." onClose={onClose}>
+    <form className="settings-form" onSubmit={async e=>{e.preventDefault();setBusy(true);setRecording(null);const ok=await settingsService.save(draft);setBusy(false);if(ok)onClose();else setFeedback('Applied on this device. Cloud saving will retry when you reconnect.');}}>
+    <div className="settings-body"><section><h3><Type size={16}/>Typography</h3><label className="settings-label">Workspace and map font<select aria-label="Workspace font" value={preset} onChange={e=>setDraft(p=>({...p,fontFamily:e.target.value==='custom'?'Your font, sans-serif':e.target.value}))}>{FONT_OPTIONS.map(f=><option key={f.label} value={f.value}>{f.label}</option>)}<option value="custom">Custom font…</option></select></label>{preset==='custom'&&<label className="settings-label">Installed font name<input aria-label="Custom font family" value={draft.fontFamily} maxLength={200} onChange={e=>setDraft(p=>({...p,fontFamily:e.target.value}))}/></label>}<div className="font-preview" style={{fontFamily:draft.fontFamily}}>A little space for your next big idea.</div><p className="settings-note">Gill Sans uses your device’s installed fonts, with a readable fallback when unavailable.</p><label className="settings-toggle"><input type="checkbox" checked={draft.spelling} onChange={e=>setDraft(p=>({...p,spelling:e.target.checked}))}/><span>Device spelling & autocorrect<small>Allow your browser and keyboard to suggest corrections while you type.</small></span></label></section>
+    <section><h3><Keyboard size={16}/>Keyboard controls</h3><p className="settings-note">Click a shortcut, then press the keys you want. Enter creates a child by default. Enter or Tab also finishes an edit before adding a branch. Shift+Enter inserts a new line. Escape always dismisses menus.</p><div className="shortcut-settings">{COMMANDS.map(command=><div key={command.id}><span>{command.label}</span><button type="button" aria-label={`Change shortcut for ${command.label}`} aria-pressed={recording===command.id} className={`shortcut-recorder ${recording===command.id?'recording':''}`} onClick={()=>setRecording(recording===command.id?null:command.id)} onKeyDown={e=>{if(recording===command.id)record(e,command.id);}}>{recording===command.id?'Press keys…':shortcutLabel(draft.shortcuts[command.id])}</button><button type="button" className="clear-shortcut" aria-label={`Clear shortcut for ${command.label}`} onClick={()=>setDraft(p=>({...p,shortcuts:{...p.shortcuts,[command.id]:''}}))}>×</button></div>)}</div></section>{feedback&&<p className="inline-feedback" role="status">{feedback}</p>}</div>
+    <footer className="library-footer"><button type="button" className="text-button" onClick={()=>{setDraft(normalizePreferences(DEFAULT_PREFERENCES));setRecording(null);setFeedback('Defaults restored. Apply settings to save.');}}><RotateCcw size={14}/>Reset defaults</button><button className="primary-button" type="submit" disabled={busy||Boolean(recording)}><Check size={15}/>{busy?'Saving…':'Apply settings'}</button></footer></form>
+  </Dialog>;
+}

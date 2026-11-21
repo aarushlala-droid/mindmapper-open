@@ -1,0 +1,85 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { mkdir } from 'node:fs/promises';
+const origin = 'http://localhost:5173';
+const login = await fetch(origin + '/signin-with-chatgpt?return_to=/', { redirect: 'manual' });
+const cookie = login.headers.get('set-cookie')?.split(';')[0];
+assert.ok(cookie, 'local development sign-in provides a cookie');
+const api = async (path = '/api/maps', body, headers = {}) => {
+  const r = await fetch(origin + path, { method: body ? 'PUT' : 'GET', headers: { Cookie: cookie, ...(body ? { 'Content-Type':'application/json' } : {}), ...headers }, ...(body ? {body:JSON.stringify(body)} : {}) });
+  return { status:r.status, data:await r.json() };
+};
+assert.equal((await fetch(origin+'/api/maps')).status,401,'anonymous reads rejected');
+assert.equal((await fetch(origin+'/api/maps',{method:'PUT',headers:{'Content-Type':'application/json'},body:'{}'})).status,401,'anonymous writes rejected');
+const {validateMap} = await import('../.sites-runtime/test-validation.mjs').catch(async()=>{
+  await build({entryPoints:['src/services/validation.ts'],outfile:'.sites-runtime/test-validation.mjs',bundle:true,format:'esm',platform:'node'});
+  return import('../.sites-runtime/test-validation.mjs');
+});
+const id = `test-persistence-${crypto.randomUUID()}`;
+const map = {id,title:'Persistence verification',rootId:'root',nodes:{root:{id:'root',text:'Original idea',parentId:null,childrenIds:[]}},layout:'radial',nodeStyle:'underline',theme:'miro-vibrant',createdAt:Date.now(),updatedAt:Date.now()};
+map.nodes.root.childrenIds=['related'];
+map.nodes.related={id:'related',text:'Related idea',parentId:'root',childrenIds:[]};
+map.links=[{id:'test-link',fromNodeId:'root',toNodeId:'related',label:'Connection survives saving'}];
+assert.ok(validateMap(map));
+assert.equal((await api('/api/maps',{map,expectedVersion:0})).status,200,'create persists');
+let saved=(await api()).data.maps.find(e=>e.map.id===id);
+assert.equal(saved.map.nodes.root.text,'Original idea');
+assert.deepEqual(saved.map.links,map.links,'cross-links persist through the map API');
+assert.equal((await api('/api/maps',{map,expectedVersion:1},{'Sec-Fetch-Site':'cross-site'})).status,403,'cross-site writes rejected');
+const cyclic=structuredClone(map);cyclic.nodes.root.childrenIds=['root'];
+assert.equal(validateMap(cyclic),false);
+assert.equal((await api('/api/maps',{map:cyclic,expectedVersion:1})).status,400,'cyclic imports rejected');
+const a=structuredClone(map);a.nodes.root.text='Device A';
+const b=structuredClone(map);b.nodes.root.text='Device B';
+const race=await Promise.all([api('/api/maps',{map:a,expectedVersion:1}),api('/api/maps',{map:b,expectedVersion:1})]);
+assert.deepEqual(race.map(r=>r.status).sort(),[200,409],'exactly one concurrent writer wins');
+const history=(await api(`/api/maps?history=${id}`)).data.revisions;
+assert.equal(history.length,2,'both successful versions retained');
+assert.equal((await api(`/api/maps?history=${id}&version=1`)).data.map.nodes.root.text,'Original idea','older content retained');
+saved=(await api()).data.maps.find(e=>e.map.id===id);
+assert.equal((await api('/api/maps',{map:saved.map,expectedVersion:2,deleted:true})).status,200);
+assert.equal((await api()).data.maps.find(e=>e.map.id===id).deleted,true,'trash is durable');
+assert.equal((await api('/api/maps',{map:saved.map,expectedVersion:3,deleted:false})).status,200);
+assert.equal((await api()).data.maps.find(e=>e.map.id===id).deleted,false,'trash restore is durable');
+// Exercise the actual client queue against the real database API using isolated device storage.
+await build({entryPoints:['src/services/storage.ts'],outfile:'.sites-runtime/test-storage.mjs',bundle:true,format:'esm',platform:'node'});
+class LocalStore { data=new Map(); get length(){return this.data.size;} key(i){return [...this.data.keys()][i]??null;} getItem(k){return this.data.get(k)??null;} setItem(k,v){this.data.set(k,String(v));} removeItem(k){this.data.delete(k);} }
+globalThis.localStorage=new LocalStore();
+Object.defineProperty(globalThis,'navigator',{value:{onLine:true},configurable:true});
+globalThis.window={addEventListener(){},setInterval(){}};
+globalThis.document={addEventListener(){},visibilityState:'visible'};
+const realFetch=globalThis.fetch;
+let failNetwork=false;
+globalThis.fetch=(url,options={})=>{if(failNetwork)return Promise.reject(new TypeError('Offline'));return realFetch(String(url).startsWith('http')?url:origin+url,{...options,headers:{...options.headers,Cookie:cookie}});};
+const first=(await import('../.sites-runtime/test-storage.mjs?first')).storageService;
+await first.initialize('local_seedy');
+const draft=first.createMap('blank','Client queue verification');
+assert.equal(draft.nodes[draft.rootId].text,'Client queue verification','new root uses chosen title');
+assert.ok(await first.flush());
+failNetwork=true;navigator.onLine=false;
+const edited=structuredClone(first.getMap(draft.id));edited.nodes[edited.rootId].text='Offline edit survives a restart';first.saveMap(edited);
+assert.equal(await first.flush(),false);
+assert.equal(first.status.state,'offline');
+assert.ok([...localStorage.data.values()].some(v=>v.includes('Offline edit survives a restart')),'offline journal is durable');
+failNetwork=false;navigator.onLine=true;
+const second=(await import('../.sites-runtime/test-storage.mjs?second')).storageService;
+await second.initialize('local_seedy');assert.ok(await second.flush());
+let cloud=(await api()).data.maps.find(e=>e.map.id===draft.id);
+assert.equal(cloud.map.nodes[cloud.map.rootId].text,'Offline edit survives a restart','restarted queue reaches cloud');
+// A remote writer changes the map after this client loaded its version.
+const remote=structuredClone(cloud.map);remote.nodes[remote.rootId].text='Remote device edit';
+assert.equal((await api('/api/maps',{map:remote,expectedVersion:cloud.version})).status,200);
+const local=structuredClone(second.getMap(draft.id));local.nodes[local.rootId].text='Local conflicting edit';second.saveMap(local);
+assert.ok(await second.flush());
+const after=(await api()).data.maps;
+assert.equal(after.find(e=>e.map.id===draft.id).map.nodes[local.rootId].text,'Remote device edit','remote edit is preserved');
+const recovered=after.find(e=>e.map.title.includes('recovered copy')&&e.map.nodes[local.rootId]?.text==='Local conflicting edit');
+assert.ok(recovered,'local conflict is preserved in a cloud copy');
+const originalVersion=(await second.getHistory(draft.id)).at(-1).version;
+assert.ok(await second.restoreVersion(draft.id,originalVersion));
+assert.equal((await api()).data.maps.find(e=>e.map.id===draft.id).map.nodes[local.rootId].text,'Client queue verification','history restore becomes a new cloud version');
+// Leave verification data only in the local trash; never touch the seeded maps.
+for(const testId of [id,draft.id,recovered.map.id]){const current=(await api()).data.maps.find(e=>e.map.id===testId);await api('/api/maps',{map:current.map,expectedVersion:current.version,deleted:true});}
+globalThis.fetch=realFetch;
+console.log('PASS: auth, create/read, validation, concurrent writes, version history, trash/restore, offline journal restart, conflict recovery, client history restore.');
+process.exit(0);
